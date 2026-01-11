@@ -2,21 +2,31 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import yfinance as yf
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import time
 import os
 import logging
+import atexit
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Create a shared ThreadPoolExecutor
+executor = ThreadPoolExecutor(max_workers=10)
+
+# Ensure proper cleanup on shutdown
+def cleanup():
+    executor.shutdown(wait=False)
+
+atexit.register(cleanup)
+
 app = FastAPI(
-    title="Indian Stock Market API", 
-    version="2.0.0",
-    description="High-performance stock data API optimized for n8n workflows"
+    title="FinCredo - Indian Stock Market API",
+    description="Get Indian stock market data for NSE-listed companies",
+    version="1.0.0"
 )
 
 # Optimized CORS for n8n
@@ -56,6 +66,10 @@ def set_cache_data(symbol: str, data: dict, cache_type: str = "price"):
 def fetch_optimized_stock_data(symbol: str, data_type: str = "full"):
     """Optimized data fetching with selective fields"""
     try:
+        # Add .NS suffix if not present
+        if not symbol.endswith('.NS'):
+            symbol += '.NS'
+            
         stock = yf.Ticker(symbol)
         data = stock.info
         
@@ -195,11 +209,47 @@ def fetch_optimized_stock_data(symbol: str, data_type: str = "full"):
         
     except Exception as e:
         logger.error(f"Error fetching data for {symbol}: {str(e)}")
-        raise HTTPException(status_code=404, detail=f"Stock {symbol} not found: {str(e)}")
+        return {"error": f"Stock {symbol} not found: {str(e)}"}
 
 @app.get("/")
-def root():
-    return {"message": "Indian Stock Market API - Optimized for n8n", "status": "running", "version": "2.0.0"}
+async def root():
+    return {
+        "message": "Welcome to FinCredo API",
+        "status": "running",
+        "docs": "Visit /docs for API documentation"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "FinCredo API"}
+
+@app.get("/stock/{symbol}")
+async def get_stock(symbol: str):
+    """Full comprehensive stock data"""
+    try:
+        # Add .NS suffix if not present
+        if not symbol.endswith('.NS'):
+            symbol += '.NS'
+            
+        cached_data = get_cached_data(symbol, "company")
+        if cached_data:
+            cached_data["cached"] = True
+            return JSONResponse(content=cached_data)
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(executor, fetch_optimized_stock_data, symbol, "full")
+        
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+            
+        result["cached"] = False
+        return JSONResponse(content=result)
+    except asyncio.CancelledError:
+        logger.info(f"Request cancelled for {symbol}")
+        raise HTTPException(status_code=408, detail="Request cancelled")
+    except Exception as e:
+        logger.error(f"Error in get_stock: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # OPTIMIZED ENDPOINTS FOR N8N
 
@@ -210,16 +260,26 @@ async def get_price_only(symbol: str):
     Returns only essential price data with 30-second cache
     Perfect for high-frequency price monitoring
     """
-    cached_data = get_cached_data(symbol, "price")
-    if cached_data:
-        cached_data["cached"] = True
-        return JSONResponse(content=cached_data)
-    
-    with ThreadPoolExecutor() as executor:
+    try:
+        cached_data = get_cached_data(symbol, "price")
+        if cached_data:
+            cached_data["cached"] = True
+            return JSONResponse(content=cached_data)
+        
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(executor, fetch_optimized_stock_data, symbol, "price_only")
+        
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+            
         result["cached"] = False
         return JSONResponse(content=result)
+    except asyncio.CancelledError:
+        logger.info(f"Request cancelled for {symbol}")
+        raise HTTPException(status_code=408, detail="Request cancelled")
+    except Exception as e:
+        logger.error(f"Error in get_price_only: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/summary/{symbol}")
 async def get_summary_optimized(symbol: str):
@@ -227,30 +287,26 @@ async def get_summary_optimized(symbol: str):
     Optimized summary endpoint for n8n workflows
     Returns key metrics with smart caching
     """
-    cached_data = get_cached_data(symbol, "company")
-    if cached_data:
-        cached_data["cached"] = True
-        return JSONResponse(content=cached_data)
-    
-    with ThreadPoolExecutor() as executor:
+    try:
+        cached_data = get_cached_data(symbol, "company")
+        if cached_data:
+            cached_data["cached"] = True
+            return JSONResponse(content=cached_data)
+        
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(executor, fetch_optimized_stock_data, symbol, "summary")
+        
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+            
         result["cached"] = False
         return JSONResponse(content=result)
-
-@app.get("/stock/{symbol}")
-async def get_stock(symbol: str):
-    """Full comprehensive stock data"""
-    cached_data = get_cached_data(symbol, "company")
-    if cached_data:
-        cached_data["cached"] = True
-        return JSONResponse(content=cached_data)
-    
-    with ThreadPoolExecutor() as executor:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(executor, fetch_optimized_stock_data, symbol, "full")
-        result["cached"] = False
-        return JSONResponse(content=result)
+    except asyncio.CancelledError:
+        logger.info(f"Request cancelled for {symbol}")
+        raise HTTPException(status_code=408, detail="Request cancelled")
+    except Exception as e:
+        logger.error(f"Error in get_summary_optimized: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/batch/price")
 async def get_batch_prices(symbols: str):
@@ -258,26 +314,33 @@ async def get_batch_prices(symbols: str):
     Batch price endpoint optimized for n8n
     Usage: /batch/price?symbols=TCS.NS,RELIANCE.NS,INFY.NS
     """
-    symbol_list = [s.strip() for s in symbols.split(',')[:20]]  # Limit to 20 symbols
-    
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    try:
+        symbol_list = [s.strip() for s in symbols.split(',')[:20]]  # Limit to 20 symbols
+        
         loop = asyncio.get_event_loop()
         tasks = [
             loop.run_in_executor(executor, fetch_optimized_stock_data, symbol, "price_only")
             for symbol in symbol_list
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    successful_results = [r for r in results if not isinstance(r, Exception)]
-    errors = [str(r) for r in results if isinstance(r, Exception)]
-    
-    return JSONResponse(content={
-        "count": len(symbol_list),
-        "successful": len(successful_results),
-        "prices": successful_results,
-        "errors": errors,
-        "timestamp": int(time.time())
-    })
+        
+        successful_results = [r for r in results if isinstance(r, dict) and "error" not in r]
+        errors = [str(r) if isinstance(r, Exception) else r.get("error", "Unknown error") 
+                 for r in results if isinstance(r, Exception) or (isinstance(r, dict) and "error" in r)]
+        
+        return JSONResponse(content={
+            "count": len(symbol_list),
+            "successful": len(successful_results),
+            "prices": successful_results,
+            "errors": errors,
+            "timestamp": int(time.time())
+        })
+    except asyncio.CancelledError:
+        logger.info("Batch request cancelled")
+        raise HTTPException(status_code=408, detail="Request cancelled")
+    except Exception as e:
+        logger.error(f"Error in get_batch_prices: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/watchlist")
 async def get_watchlist_data(symbols: str, type: str = "summary"):
@@ -285,25 +348,31 @@ async def get_watchlist_data(symbols: str, type: str = "summary"):
     Optimized watchlist endpoint for n8n
     Usage: /watchlist?symbols=TCS.NS,RELIANCE.NS&type=price
     """
-    symbol_list = [s.strip() for s in symbols.split(',')[:15]]  # Limit to 15 symbols
-    data_type = "price_only" if type == "price" else "summary"
-    
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    try:
+        symbol_list = [s.strip() for s in symbols.split(',')[:15]]  # Limit to 15 symbols
+        data_type = "price_only" if type == "price" else "summary"
+        
         loop = asyncio.get_event_loop()
         tasks = [
             loop.run_in_executor(executor, fetch_optimized_stock_data, symbol, data_type)
             for symbol in symbol_list
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    successful_results = [r for r in results if not isinstance(r, Exception)]
-    
-    return JSONResponse(content={
-        "watchlist": successful_results,
-        "count": len(successful_results),
-        "type": type,
-        "timestamp": int(time.time())
-    })
+        
+        successful_results = [r for r in results if isinstance(r, dict) and "error" not in r]
+        
+        return JSONResponse(content={
+            "watchlist": successful_results,
+            "count": len(successful_results),
+            "type": type,
+            "timestamp": int(time.time())
+        })
+    except asyncio.CancelledError:
+        logger.info("Watchlist request cancelled")
+        raise HTTPException(status_code=408, detail="Request cancelled")
+    except Exception as e:
+        logger.error(f"Error in get_watchlist_data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/popular/indian")
 async def get_popular_indian_stocks():
@@ -340,3 +409,9 @@ def get_metrics():
         "cache_hit_ratio": "N/A",  # You can implement this
         "timestamp": int(time.time())
     })
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("Shutting down FinCredo API...")
+    executor.shutdown(wait=False)
