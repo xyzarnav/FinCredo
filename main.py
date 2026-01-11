@@ -95,42 +95,21 @@ def fetch_optimized_stock_data(symbol: str, data_type: str = "full"):
         
         # Test if symbol exists with a quick call
         try:
-            # Quick test - get basic info with timeout
-            import threading
-            result_container = {}
-            exception_container = {}
+            # Add more detailed error logging
+            logger.info(f"Creating yfinance ticker for {symbol}")
+            data = stock.info
+            logger.info(f"Retrieved info for {symbol}: {len(data) if data else 0} fields")
             
-            def fetch_data():
-                try:
-                    data = stock.info
-                    if not data or len(data) < 5:  # Basic validation
-                        exception_container['error'] = f"No data available for {symbol}"
-                        return
-                    result_container['data'] = data
-                except Exception as e:
-                    exception_container['error'] = str(e)
-            
-            # Run with timeout
-            thread = threading.Thread(target=fetch_data)
-            thread.daemon = True
-            thread.start()
-            thread.join(timeout=10)  # 10 second timeout
-            
-            if thread.is_alive():
-                return {"error": f"Timeout fetching data for {symbol}"}
-            
-            if 'error' in exception_container:
-                return {"error": exception_container['error']}
-            
-            if 'data' not in result_container:
-                return {"error": f"No data returned for {symbol}"}
-                
-            data = result_container['data']
+            if not data or len(data) < 5:
+                error_msg = f"No data available for {symbol} - received {len(data) if data else 0} fields"
+                logger.error(error_msg)
+                return {"error": error_msg}
             
         except Exception as e:
-            logger.error(f"Error in initial data fetch for {symbol}: {str(e)}")
-            return {"error": f"Failed to fetch data for {symbol}: {str(e)}"}
-        
+            error_msg = f"Error in yfinance data fetch for {symbol}: {type(e).__name__}: {str(e)}"
+            logger.error(error_msg)
+            return {"error": error_msg}
+            
         if data_type == "price_only":
             # Minimal data for high-frequency price updates
             result = {
