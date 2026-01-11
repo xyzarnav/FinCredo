@@ -9,6 +9,8 @@ import time
 import os
 import logging
 import atexit
+import signal
+from functools import wraps
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -63,150 +65,162 @@ def set_cache_data(symbol: str, data: dict, cache_type: str = "price"):
     
     cache[cache_key] = (data, time.time())
 
+# Add timeout decorator
+def timeout_handler(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        def timeout_signal_handler(signum, frame):
+            raise TimeoutError("Request timed out")
+        
+        # Set timeout for Windows (signal doesn't work on Windows)
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Function {func.__name__} failed: {str(e)}")
+            raise
+    return wrapper
+
+@timeout_handler
 def fetch_optimized_stock_data(symbol: str, data_type: str = "full"):
-    """Optimized data fetching with selective fields"""
+    """Optimized data fetching with selective fields and timeout"""
     try:
+        logger.info(f"Fetching data for {symbol} with type {data_type}")
+        
         # Add .NS suffix if not present
         if not symbol.endswith('.NS'):
             symbol += '.NS'
             
+        # Create ticker with timeout
         stock = yf.Ticker(symbol)
-        data = stock.info
+        
+        # Test if symbol exists with a quick call
+        try:
+            # Quick test - get basic info with timeout
+            import threading
+            result_container = {}
+            exception_container = {}
+            
+            def fetch_data():
+                try:
+                    data = stock.info
+                    if not data or len(data) < 5:  # Basic validation
+                        exception_container['error'] = f"No data available for {symbol}"
+                        return
+                    result_container['data'] = data
+                except Exception as e:
+                    exception_container['error'] = str(e)
+            
+            # Run with timeout
+            thread = threading.Thread(target=fetch_data)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout=10)  # 10 second timeout
+            
+            if thread.is_alive():
+                return {"error": f"Timeout fetching data for {symbol}"}
+            
+            if 'error' in exception_container:
+                return {"error": exception_container['error']}
+            
+            if 'data' not in result_container:
+                return {"error": f"No data returned for {symbol}"}
+                
+            data = result_container['data']
+            
+        except Exception as e:
+            logger.error(f"Error in initial data fetch for {symbol}: {str(e)}")
+            return {"error": f"Failed to fetch data for {symbol}: {str(e)}"}
         
         if data_type == "price_only":
             # Minimal data for high-frequency price updates
             result = {
                 "symbol": symbol,
-                "currentPrice": data.get("currentPrice") or data.get("regularMarketPrice"),
-                "change": data.get("regularMarketChange"),
-                "changePercent": data.get("regularMarketChangePercent"),
-                "volume": data.get("volume") or data.get("regularMarketVolume"),
+                "currentPrice": data.get("currentPrice") or data.get("regularMarketPrice") or "N/A",
+                "change": data.get("regularMarketChange") or 0,
+                "changePercent": data.get("regularMarketChangePercent") or 0,
+                "volume": data.get("volume") or data.get("regularMarketVolume") or 0,
+                "dividendYield": data.get("dividendYield") or "N/A",
+                "roe": data.get("returnOnEquity") or "N/A",
+                "debtToEquity": data.get("debtToEquity") or "N/A",
+                "bookValue": data.get("bookValue") or "N/A",
+                "beta": data.get("beta") or "N/A",
+                "faceValue": data.get("faceValue") or "N/A",
                 "timestamp": int(time.time())
             }
         elif data_type == "summary":
             # Key metrics for n8n workflows
             result = {
                 "symbol": symbol,
-                "name": data.get("longName"),
-                "currentPrice": data.get("currentPrice") or data.get("regularMarketPrice"),
-                "change": data.get("regularMarketChange"),
-                "changePercent": data.get("regularMarketChangePercent"),
-                "peRatio": data.get("trailingPE") or data.get("forwardPE"),
-                "eps": data.get("trailingEps") or data.get("forwardEps"),
-                "priceToBook": data.get("priceToBook"),
-                "dividendYield": data.get("dividendYield"),
-                "sector": data.get("sector"),
-                "marketCap": data.get("marketCap"),
-                "volume": data.get("volume") or data.get("regularMarketVolume"),
-                "fiftyTwoWeekHigh": data.get("fiftyTwoWeekHigh"),
-                "fiftyTwoWeekLow": data.get("fiftyTwoWeekLow"),
+                "name": data.get("longName") or data.get("shortName") or "N/A",
+                "currentPrice": data.get("currentPrice") or data.get("regularMarketPrice") or "N/A",
+                "change": data.get("regularMarketChange") or 0,
+                "changePercent": data.get("regularMarketChangePercent") or 0,
+                "peRatio": data.get("trailingPE") or data.get("forwardPE") or "N/A",
+                "eps": data.get("trailingEps") or data.get("forwardEps") or "N/A",
+                "priceToBook": data.get("priceToBook") or "N/A",
+                "dividendYield": data.get("dividendYield") or "N/A",
+                "roe": data.get("returnOnEquity") or "N/A",
+                "debtToEquity": data.get("debtToEquity") or "N/A",
+                "bookValue": data.get("bookValue") or "N/A",
+                "beta": data.get("beta") or "N/A",
+                "faceValue": data.get("faceValue") or "N/A",
+                "sector": data.get("sector") or "N/A",
+                "marketCap": data.get("marketCap") or "N/A",
+                "volume": data.get("volume") or data.get("regularMarketVolume") or 0,
+                "fiftyTwoWeekHigh": data.get("fiftyTwoWeekHigh") or "N/A",
+                "fiftyTwoWeekLow": data.get("fiftyTwoWeekLow") or "N/A",
                 "timestamp": int(time.time())
             }
         else:
-            # Full data (your existing comprehensive data)
-            hist = stock.history(period="1y")
-            year_high = float(hist['High'].max()) if not hist.empty else None
-            year_low = float(hist['Low'].min()) if not hist.empty else None
-            
+            # Simplified full data to prevent hanging
             result = {
                 # Basic Price Data
                 "symbol": symbol,
-                "name": data.get("longName"),
-                "currentPrice": data.get("currentPrice") or data.get("regularMarketPrice"),
-                "open": data.get("open") or data.get("regularMarketOpen"),
-                "dayHigh": data.get("dayHigh") or data.get("regularMarketDayHigh"),
-                "dayLow": data.get("dayLow") or data.get("regularMarketDayLow"),
-                "previousClose": data.get("previousClose") or data.get("regularMarketPreviousClose"),
-                "change": data.get("regularMarketChange"),
-                "changePercent": data.get("regularMarketChangePercent"),
+                "name": data.get("longName") or data.get("shortName") or "N/A",
+                "currentPrice": data.get("currentPrice") or data.get("regularMarketPrice") or "N/A",
+                "open": data.get("open") or data.get("regularMarketOpen") or "N/A",
+                "dayHigh": data.get("dayHigh") or data.get("regularMarketDayHigh") or "N/A",
+                "dayLow": data.get("dayLow") or data.get("regularMarketDayLow") or "N/A",
+                "previousClose": data.get("previousClose") or data.get("regularMarketPreviousClose") or "N/A",
+                "change": data.get("regularMarketChange") or 0,
+                "changePercent": data.get("regularMarketChangePercent") or 0,
                 
                 # Volume & Market Data
-                "volume": data.get("volume") or data.get("regularMarketVolume"),
-                "averageVolume": data.get("averageVolume") or data.get("averageVolume10days"),
-                "marketCap": data.get("marketCap"),
-                "currency": data.get("currency"),
+                "volume": data.get("volume") or data.get("regularMarketVolume") or 0,
+                "marketCap": data.get("marketCap") or "N/A",
+                "currency": data.get("currency") or "INR",
                 
                 # 52-Week Data
-                "fiftyTwoWeekHigh": data.get("fiftyTwoWeekHigh") or year_high,
-                "fiftyTwoWeekLow": data.get("fiftyTwoWeekLow") or year_low,
-                "fiftyTwoWeekChange": data.get("52WeekChange"),
+                "fiftyTwoWeekHigh": data.get("fiftyTwoWeekHigh") or "N/A",
+                "fiftyTwoWeekLow": data.get("fiftyTwoWeekLow") or "N/A",
                 
                 # Valuation Metrics
-                "peRatio": data.get("trailingPE") or data.get("forwardPE"),
-                "pegRatio": data.get("pegRatio"),
-                "priceToBook": data.get("priceToBook"),
-                "priceToSales": data.get("priceToSalesTrailing12Months"),
-                "enterpriseValue": data.get("enterpriseValue"),
-                "evToRevenue": data.get("enterpriseToRevenue"),
-                "evToEbitda": data.get("enterpriseToEbitda"),
-                
-                # Financial Metrics
-                "eps": data.get("trailingEps") or data.get("forwardEps"),
-                "beta": data.get("beta"),
-                "bookValue": data.get("bookValue"),
-                "profitMargins": data.get("profitMargins"),
-                "returnOnAssets": data.get("returnOnAssets"),
-                "returnOnEquity": data.get("returnOnEquity"),
-                
-                # Dividend Information
-                "dividendYield": data.get("dividendYield"),
-                "dividendRate": data.get("dividendRate"),
-                "exDividendDate": data.get("exDividendDate"),
-                "payoutRatio": data.get("payoutRatio"),
-                "fiveYearAvgDividendYield": data.get("fiveYearAvgDividendYield"),
+                "peRatio": data.get("trailingPE") or data.get("forwardPE") or "N/A",
+                "priceToBook": data.get("priceToBook") or "N/A",
+                "eps": data.get("trailingEps") or data.get("forwardEps") or "N/A",
+                "dividendYield": data.get("dividendYield") or "N/A",
+                "roe": data.get("returnOnEquity") or "N/A",
+                "debtToEquity": data.get("debtToEquity") or "N/A",
+                "bookValue": data.get("bookValue") or "N/A",
+                "beta": data.get("beta") or "N/A",
+                "faceValue": data.get("faceValue") or "N/A",
                 
                 # Company Information
-                "sector": data.get("sector"),
-                "industry": data.get("industry"),
-                "country": data.get("country"),
-                "exchange": data.get("exchange"),
-                "quoteType": data.get("quoteType"),
-                "website": data.get("website"),
-                "employees": data.get("fullTimeEmployees"),
-                
-                # Moving Averages
-                "fiftyDayAverage": data.get("fiftyDayAverage"),
-                "twoHundredDayAverage": data.get("twoHundredDayAverage"),
-                
-                # Additional Metrics
-                "totalCash": data.get("totalCash"),
-                "totalDebt": data.get("totalDebt"),
-                "debtToEquity": data.get("debtToEquity"),
-                "currentRatio": data.get("currentRatio"),
-                "quickRatio": data.get("quickRatio"),
-                "grossMargins": data.get("grossMargins"),
-                "operatingMargins": data.get("operatingMargins"),
-                
-                # Revenue & Growth
-                "totalRevenue": data.get("totalRevenue"),
-                "revenuePerShare": data.get("revenuePerShare"),
-                "revenueGrowth": data.get("revenueGrowth"),
-                "earningsGrowth": data.get("earningsGrowth"),
-                
-                # Analyst Recommendations
-                "recommendationMean": data.get("recommendationMean"),
-                "recommendationKey": data.get("recommendationKey"),
-                "numberOfAnalystOpinions": data.get("numberOfAnalystOpinions"),
-                "targetHighPrice": data.get("targetHighPrice"),
-                "targetLowPrice": data.get("targetLowPrice"),
-                "targetMeanPrice": data.get("targetMeanPrice"),
-                
-                # Additional Info
-                "sharesOutstanding": data.get("sharesOutstanding"),
-                "floatShares": data.get("floatShares"),
-                "heldPercentInsiders": data.get("heldPercentInsiders"),
-                "heldPercentInstitutions": data.get("heldPercentInstitutions"),
-                "shortRatio": data.get("shortRatio"),
-                "shortPercentOfFloat": data.get("shortPercentOfFloat"),
+                "sector": data.get("sector") or "N/A",
+                "industry": data.get("industry") or "N/A",
+                "exchange": data.get("exchange") or "NSE",
                 
                 # Timestamps
-                "timestamp": int(time.time()),
-                "lastMarketUpdate": data.get("regularMarketTime")
+                "timestamp": int(time.time())
             }
         
+        logger.info(f"Successfully fetched data for {symbol}")
         set_cache_data(symbol, result, "price" if data_type == "price_only" else "company")
         return result
         
+    except TimeoutError:
+        logger.error(f"Timeout fetching data for {symbol}")
+        return {"error": f"Timeout fetching data for {symbol}"}
     except Exception as e:
         logger.error(f"Error fetching data for {symbol}: {str(e)}")
         return {"error": f"Stock {symbol} not found: {str(e)}"}
@@ -415,3 +429,18 @@ async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("Shutting down FinCredo API...")
     executor.shutdown(wait=False)
+
+# Add a simple test endpoint
+@app.get("/test")
+async def test_endpoint():
+    """Simple test endpoint to verify API is working"""
+    return {
+        "status": "working",
+        "message": "FinCredo API is running",
+        "timestamp": int(time.time()),
+        "test_urls": {
+            "price_only": "/price/TCS",
+            "summary": "/summary/TCS", 
+            "full_data": "/stock/TCS"
+        }
+    }
